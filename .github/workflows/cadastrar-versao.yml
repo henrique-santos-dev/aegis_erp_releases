@@ -1,0 +1,40 @@
+# Workflow do repositório público de pacotes (henrique-santos-dev/aegis_erp_releases), cópia canônica aqui (infra/pacotes/).
+# LIC-17/IMP-07: ao PUBLICAR uma release (rascunho não dispara), cadastra a versão no catálogo do portal Aegis com um
+# token de integração de escopo único. Cadastrar não libera para nenhum cliente; a liberação continua manual no portal.
+# Secrets do repositório de pacotes: AEGIS_NUVEM_URL (ex.: https://srv1912801.hstgr.cloud) e AEGIS_PORTAL_INTEGRACAO.
+name: Cadastrar versão no portal Aegis
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+env:
+  TAG: ${{ github.event.release.tag_name }}
+jobs:
+  cadastrar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar aegis-release.json da release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p aegis-release.json
+      - name: Cadastrar no catálogo (repetição idêntica é aceita)
+        env:
+          AEGIS_NUVEM_URL: ${{ secrets.AEGIS_NUVEM_URL }}
+          AEGIS_PORTAL_INTEGRACAO: ${{ secrets.AEGIS_PORTAL_INTEGRACAO }}
+          NOTAS: ${{ github.event.release.body }}
+        run: |
+          set -euo pipefail
+          [ -n "$AEGIS_NUVEM_URL" ] || { echo "Defina o secret AEGIS_NUVEM_URL."; exit 1; }
+          [ -n "$AEGIS_PORTAL_INTEGRACAO" ] || { echo "Defina o secret AEGIS_PORTAL_INTEGRACAO (token de integração criado no portal)."; exit 1; }
+          versao=$(jq -r .versao aegis-release.json)
+          [ "v$versao" = "$TAG" ] || { echo "A tag $TAG difere da versão $versao do pacote."; exit 1; }
+          notas="${NOTAS:-Release $TAG}"
+          corpo=$(jq -n --arg v "$versao" --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/" \
+            --arg sha "$(jq -r .sha512 aegis-release.json)" --argjson tam "$(jq -r .tamanhoBytes aegis-release.json)" \
+            --arg notas "${notas:0:4000}" '{versao:$v,urlBase:$url,sha512:$sha,tamanhoBytes:$tam,notas:$notas}')
+          codigo=$(curl -sS -o resposta.json -w '%{http_code}' -X POST "${AEGIS_NUVEM_URL%/}/api/portal/versoes" \
+            -H 'Content-Type: application/json' -H "X-Portal-Integracao: $AEGIS_PORTAL_INTEGRACAO" --data "$corpo")
+          cat resposta.json; echo
+          [ "$codigo" = "200" ] || { echo "O portal respondeu $codigo."; exit 1; }
+          echo "Versão $versao cadastrada no catálogo. Libere para o cliente piloto em Clientes › Detalhes."
